@@ -1,24 +1,24 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import os
+import sys # Added for sys.executable and sys.argv
 import re
+import subprocess
 import configparser
-import sys # For determining if running as a script or frozen
-import ctypes # For checking admin rights and re-launching
-import subprocess # Fallback or alternative for re-launching if needed
+import threading # Added import for threading
+import ctypes # Added for admin check
+import psutil
+import shutil # Added for rmtree
+from datetime import datetime # Added for backup timestamp
+import zipfile # Added for backup zip creation
 
-# Constants
+# Global constants for configuration
 CONFIG_FILE_NAME = "lilygo_config.ini"
+CONFIG_SECTION = "ServerManager"
+CONFIG_KEY_CURRENT_SERVER = "CurrentServer"
 SERVER_DIR_PREFIX = "bedrock-server-"
 WORLDS_DIR_NAME = "worlds"
-CONFIG_SECTION = "Settings"
-CONFIG_KEY_CURRENT_SERVER = "current_server_directory"
-
-def is_admin():
-    try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
-    except:
-        return False
+SERVICE_NAME = "bedrock_server_nssm"
 
 class ServerManagerApp:
     def __init__(self, root_window):
@@ -49,30 +49,34 @@ class ServerManagerApp:
         self.root.rowconfigure(0, weight=1)
 
         # Server Directory Label and Entry
-        ttk.Label(main_frame, text="Selected Server Directory:").grid(row=0, column=0, sticky=tk.W, pady=(0,5))
+        ttk.Label(main_frame, text="Selected Server Directory:").grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0,5))
         self.server_entry = ttk.Entry(main_frame, textvariable=self.current_server_var, state="readonly", width=70)
-        self.server_entry.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0,10))
+        self.server_entry.grid(row=1, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=(0,10))
 
-        # Refresh Button
-        self.refresh_button = ttk.Button(main_frame, text="Re-scan and Check Server", command=self._initial_setup_and_checks)
-        self.refresh_button.grid(row=2, column=0, sticky=tk.W, pady=(0,10))
+        # Backup Button
+        self.backup_button = ttk.Button(main_frame, text="備份", command=self._backup_data)
+        self.backup_button.grid(row=2, column=0, sticky=(tk.W, tk.E), padx=(0,5), pady=(0,10))
+
+        # Change Server Button
+        self.change_server_button = ttk.Button(main_frame, text="Change Server", command=self._select_server_directory)
+        self.change_server_button.grid(row=2, column=1, sticky=(tk.W, tk.E), padx=5, pady=(0,10))
         
-        # 開機自動啟動按鈕（中間）
+        # Auto-start Button
         self.auto_start_button = ttk.Button(main_frame, text="設為開機自動啟動", command=self._toggle_autostart_bedrock_server)
-        self.auto_start_button.grid(row=2, column=1, sticky=tk.E, pady=(0,10))
+        self.auto_start_button.grid(row=2, column=2, sticky=(tk.W, tk.E), padx=5, pady=(0,10))
 
-        # 啟動 Bedrock Server 按鈕（最右側）
+        # Start/Stop Server Button
         self.server_process = None
         self.server_thread = None
         self.start_server_button = ttk.Button(main_frame, text="啟動 Bedrock Server", command=self._toggle_bedrock_server)
-        self.start_server_button.grid(row=2, column=2, sticky=tk.E, pady=(0,10))
+        self.start_server_button.grid(row=2, column=3, sticky=(tk.W, tk.E), padx=(5,0), pady=(0,10))
 
         # Status Label
-        ttk.Label(main_frame, text="Status Log:").grid(row=3, column=0, sticky=tk.W, pady=(5,0))
+        ttk.Label(main_frame, text="Status Log:").grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(5,0))
         
         # Status Text Area with Scrollbar
         status_frame = ttk.Frame(main_frame)
-        status_frame.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0,10))
+        status_frame.grid(row=4, column=0, columnspan=4, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0,10))
         status_frame.columnconfigure(0, weight=1)
         status_frame.rowconfigure(0, weight=1)
 
@@ -84,10 +88,11 @@ class ServerManagerApp:
         self.status_text['yscrollcommand'] = scrollbar.set
 
         # Configure main_frame column and row weights for expansion
-        main_frame.columnconfigure(0, weight=0)
-        main_frame.columnconfigure(1, weight=0)
-        main_frame.columnconfigure(2, weight=1)  # 讓最右側按鈕與 text box 右側對齊
-        main_frame.rowconfigure(4, weight=1) # Allow status_frame (and Text widget) to expand vertically
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.columnconfigure(1, weight=1)
+        main_frame.columnconfigure(2, weight=1)
+        main_frame.columnconfigure(3, weight=1)
+        main_frame.rowconfigure(4, weight=1)
 
     def _add_status_message(self, message, is_error=False, is_warning=False):
         print(f"Status: {message}") # Log to console as well
@@ -344,7 +349,7 @@ class ServerManagerApp:
         # 顯示提示，並允許按鈕關閉該進程
         self._add_status_message(f"偵測到已執行的 bedrock_server.exe (PID: {proc.pid})，無法即時顯示 log，但已載入現有 log。", is_warning=True)
         self.server_process = proc  # 儲存 psutil.Process 物件
-        self.start_server_button.config(text="關閉 Bedrock Server")
+        self.start_server_button.config(text="停止 Bedrock Server")
         self._load_existing_bedrock_log(proc)
 
     def _initial_setup_and_checks(self):
@@ -427,100 +432,263 @@ class ServerManagerApp:
             self._add_status_message("Could not determine a server directory to use.", is_warning=True)
             self._check_autostart_status()
 
-    def _toggle_bedrock_server(self):
-        import threading
-        import sys
-        script_path = os.path.join(self.script_dir, "run_bedrock_server.py")
-        server_dir = os.path.join(self.script_dir, self.current_server_var.get())
-        def stop_server():
+    def _select_server_directory(self):
+        server_infos = self._get_server_directories_info()
+        if not server_infos:
+            messagebox.showinfo("Change Server", "No Bedrock server directories found to select from.", parent=self.root)
+            return
+
+        select_window = tk.Toplevel(self.root)
+        select_window.title("Select Server Directory")
+        select_window.transient(self.root) # Set to be on top of the main window
+        select_window.grab_set() # Make it modal
+
+        ttk.Label(select_window, text="Available server directories:").pack(pady=(10,5), padx=10)
+
+        listbox_frame = ttk.Frame(select_window)
+        listbox_frame.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
+        
+        listbox = tk.Listbox(listbox_frame, exportselection=False, height=10)
+        for s_info in server_infos:
+            listbox.insert(tk.END, s_info["name"])
+        
+        current_server_name = self.current_server_var.get()
+        if current_server_name:
             try:
-                # 無論 self.server_process 狀態，皆搜尋所有 bedrock_server.exe 並終止
-                try:
-                    import psutil
-                    found = False
-                    for proc in psutil.process_iter(['pid', 'name']):
-                        if proc.info['name'] and 'bedrock_server.exe' in proc.info['name'].lower():
-                            try:
-                                proc.terminate()
-                                proc.wait(timeout=10)
-                                self._add_status_message(f"已終止 bedrock_server.exe (PID: {proc.pid})")
-                                found = True
-                            except Exception as e:
-                                self._add_status_message(f"終止 bedrock_server.exe (PID: {proc.pid}) 失敗: {e}", is_error=True)
-                    if not found:
-                        self._add_status_message("未找到任何 bedrock_server.exe 進程。", is_warning=True)
-                except ImportError:
-                    # 若無 psutil 則 fallback 用 --stop
-                    stop_proc = subprocess.Popen([sys.executable, script_path, "--stop"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                    for line in stop_proc.stdout:
-                        self._add_status_message(line.rstrip())
-                    stop_proc.wait()
-                    self._add_status_message("=== bedrock_server.exe 已關閉 ===")
-            except Exception as e:
-                self._add_status_message(f"關閉 bedrock_server.exe 失敗: {e}", is_error=True)
-            self.server_process = None
-            self.start_server_button.config(text="啟動 Bedrock Server")
-        # 判斷是否有任何 bedrock_server.exe 在執行
-        try:
-            import psutil
-            any_running = any(
-                proc.info['name'] and 'bedrock_server.exe' in proc.info['name'].lower()
-                for proc in psutil.process_iter(['name'])
-            )
-        except ImportError:
-            any_running = self.server_process and (hasattr(self.server_process, 'poll') and self.server_process.poll() is None or hasattr(self.server_process, 'is_running') and self.server_process.is_running())
-        if any_running:
-            self._add_status_message("=== 正在關閉 bedrock_server.exe... ===")
-            threading.Thread(target=stop_server, daemon=True).start()
+                # Get a list of names for index finding
+                names_only = [s_info["name"] for s_info in server_infos]
+                current_idx = names_only.index(current_server_name)
+                listbox.select_set(current_idx)
+                listbox.see(current_idx)
+                listbox.activate(current_idx)
+            except ValueError:
+                pass # Current server not in list, do nothing
+
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        list_scrollbar = ttk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=listbox.yview)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox['yscrollcommand'] = list_scrollbar.set
+        
+        def on_select():
+            selected_indices = listbox.curselection()
+            if not selected_indices:
+                messagebox.showwarning("Selection Error", "Please select a server directory.", parent=select_window)
+                return
+            
+            selected_server_name = listbox.get(selected_indices[0])
+            
+            self._add_status_message(f"Changing server to: {selected_server_name}...")
+            self._save_config(selected_server_name)
+            
+            # Trigger a full refresh which will load the new config, update UI, and symlinks
+            self._initial_setup_and_checks() 
+            
+            # _initial_setup_and_checks will set the final status, but we can confirm the change.
+            # Check if the current_server_var actually changed to the selected one after refresh.
+            if self.current_server_var.get() == selected_server_name:
+                self._add_status_message(f"Successfully changed and refreshed for server: {selected_server_name}.")
+            else:
+                self._add_status_message(f"Server change initiated for {selected_server_name}. Check status for details.", is_warning=True)
+
+            select_window.destroy()
+
+        def on_cancel():
+            select_window.destroy()
+
+        button_frame = ttk.Frame(select_window)
+        button_frame.pack(pady=(5,10), padx=10)
+
+        select_button = ttk.Button(button_frame, text="Select", command=on_select)
+        select_button.pack(side=tk.LEFT, padx=5)
+
+        cancel_button = ttk.Button(button_frame, text="Cancel", command=on_cancel)
+        cancel_button.pack(side=tk.LEFT, padx=5)
+
+        # Center the Toplevel window
+        select_window.update_idletasks() # Ensure window size is calculated
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (select_window.winfo_width() // 2)
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (select_window.winfo_height() // 2)
+        select_window.geometry(f"+{x}+{y}")
+        select_window.focus_set()
+
+
+    def _toggle_bedrock_server(self):
+        current_button_text = self.start_server_button.cget("text")
+        script_path = os.path.join(self.script_dir, "run_bedrock_server.py")
+        # server_dir is primarily for _start_bedrock_server direct start, 
+        # but script_path is needed by _execute_stop_sequence.
+        server_dir = os.path.join(self.script_dir, self.current_server_var.get())
+
+        if current_button_text in ("關閉 Bedrock Server", "停止 Bedrock Server"):
+            self._add_status_message("=== Attempting to stop Bedrock Server... ===")
+            # Disable button while stopping to prevent multiple clicks
+            # self.start_server_button.config(state=tk.DISABLED) 
+            # Re-enabling is handled by _check_autostart_status or can be added in finally of thread
+            threading.Thread(target=self._execute_stop_sequence, args=(script_path,), daemon=True).start()
         else:
             self._start_bedrock_server()
 
+    def _execute_stop_sequence(self, script_path):
+        cflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+        successfully_stopped_via_service = False
+
+        try:
+            # 1. Check service status
+            self._add_status_message(f"Checking status of service '{SERVICE_NAME}'...")
+            status_args = [sys.executable, script_path, "--status-service"]
+            status_proc = subprocess.Popen(status_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=cflags)
+            status_stdout, status_stderr = status_proc.communicate(timeout=20)
+            service_status_rc = status_proc.returncode
+            self._add_status_message(f"Service status check: RC={service_status_rc}")
+            if status_stdout:
+                self._add_status_message(f"Status stdout:\n{status_stdout.strip()}")
+            if status_stderr:
+                self._add_status_message(f"Status stderr:\n{status_stderr.strip()}", is_warning=bool(status_stderr.strip()))
+
+            # 2. Attempt to stop via service if appropriate
+            if service_status_rc in (0, 2, 3): # 0=running, 2=stopped (harmless to stop again), 3=unknown
+                self._add_status_message(f"Attempting to stop service '{SERVICE_NAME}' (current status RC={service_status_rc})...")
+                stop_service_args = [sys.executable, script_path, "--stop-service"]
+                stop_service_proc = subprocess.Popen(stop_service_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=cflags)
+                s_out, _ = stop_service_proc.communicate(timeout=30)
+                self._add_status_message(f"Stop service command output:\n{s_out.strip()}")
+                if stop_service_proc.returncode == 0:
+                    self._add_status_message(f"Service '{SERVICE_NAME}' stop command issued successfully.")
+                    successfully_stopped_via_service = True
+                else:
+                    self._add_status_message(f"Service '{SERVICE_NAME}' stop command failed or reported an issue (RC={stop_service_proc.returncode}).", is_warning=True)
+            
+            # 3. If not successfully stopped by service, or if service was not in a state to be stopped by manager, use fallback.
+            if not successfully_stopped_via_service:
+                if service_status_rc == 1: # Service does not exist
+                    self._add_status_message(f"Service '{SERVICE_NAME}' not found. Attempting 'run_bedrock_server.py --stop'.")
+                elif service_status_rc == 4: # Query failed
+                    self._add_status_message(f"Service '{SERVICE_NAME}' status query failed. Attempting 'run_bedrock_server.py --stop'.", is_warning=True)
+                else: # Service was 0,2,3 but --stop-service failed, or other status_rc
+                    self._add_status_message("Service stop failed or not applicable. Attempting 'run_bedrock_server.py --stop' as fallback.")
+
+                # Directly use run_bedrock_server.py --stop as the fallback
+                self._add_status_message("Executing 'run_bedrock_server.py --stop' for process termination.")
+                fallback_stop_args = [sys.executable, script_path, "--stop"]
+                fallback_proc = subprocess.Popen(fallback_stop_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=cflags)
+                f_out, _ = fallback_proc.communicate(timeout=30)
+                self._add_status_message(f"'run_bedrock_server.py --stop' output:\\n{f_out.strip()}")
+                if fallback_proc.returncode == 0:
+                     self._add_status_message("'run_bedrock_server.py --stop' completed.")
+                else:
+                     self._add_status_message(f"'run_bedrock_server.py --stop' completed with issues (RC={fallback_proc.returncode}).", is_warning=True)
+
+        except subprocess.TimeoutExpired:
+            self._add_status_message("A stop operation (service status/stop, or fallback stop) timed out.", is_error=True)
+        except Exception as e:
+            self._add_status_message(f"Overall error during stop sequence: {e}", is_error=True)
+        finally:
+            self.server_process = None # Clear any Popen object from a direct start
+            # Schedule GUI update on the main thread
+            self.root.after(200, self._check_autostart_status)
+
     def _start_bedrock_server(self):
-        import threading
-        import sys
         server_dir = os.path.join(self.script_dir, self.current_server_var.get())
         script_path = os.path.join(self.script_dir, "run_bedrock_server.py")
+
         if not os.path.isfile(script_path):
             self._add_status_message("run_bedrock_server.py not found!", is_error=True)
             return
         if not os.path.isdir(server_dir):
             self._add_status_message(f"Server directory '{server_dir}' not found!", is_error=True)
             return
-        def run_and_capture():
-            self._add_status_message("=== 啟動 bedrock_server.exe ===")
+
+        # Check service status first
+        try:
+            status_proc = subprocess.Popen(
+                [sys.executable, script_path, "--status-service"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            _, _ = status_proc.communicate()
+            service_status_returncode = status_proc.returncode
+        except Exception as e:
+            self._add_status_message(f"Failed to check service status: {e}", is_warning=True)
+            service_status_returncode = -1 # Indicate failure to check
+
+        def run_and_capture_service_start():
+            self._add_status_message("=== Starting Bedrock Server (via service) ===")
             try:
-                self.server_process = subprocess.Popen([sys.executable, script_path, "--start", server_dir],
-                                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                # Use --start-service
+                self.server_process = subprocess.Popen(
+                    [sys.executable, script_path, "--start-service"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                # Capture and display output
                 for line in self.server_process.stdout:
                     self._add_status_message(line.rstrip())
                 self.server_process.wait()
-                self._add_status_message(f"=== bedrock_server.exe 結束，退出碼: {self.server_process.returncode} ===")
+                self._add_status_message(f"=== Bedrock Server service operation finished, exit code: {self.server_process.returncode} ===")
+                # After service start attempt, re-check autostart status to update buttons correctly
+                self.root.after(5000, self._check_autostart_status)
+                # Note: self.server_process here is for the script call, not bedrock_server.exe itself
+                # The actual bedrock_server.exe is managed by the service.
+            except Exception as e:
+                self._add_status_message(f"Failed to start Bedrock Server service: {e}", is_error=True)
+            # Button text will be updated by _check_autostart_status
+
+        def run_and_capture_direct_start():
+            self._add_status_message("=== Starting bedrock_server.exe (direct) ===")
+            try:
+                self.server_process = subprocess.Popen(
+                    [sys.executable, script_path, "--start", server_dir],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                for line in self.server_process.stdout:
+                    self._add_status_message(line.rstrip())
+                self.server_process.wait()
+                self._add_status_message(f"=== bedrock_server.exe finished, exit code: {self.server_process.returncode} ===")
                 self.server_process = None
                 self.start_server_button.config(text="啟動 Bedrock Server")
             except Exception as e:
-                self._add_status_message(f"啟動或執行 bedrock_server.exe 失敗: {e}", is_error=True)
+                self._add_status_message(f"Failed to start or run bedrock_server.exe (direct): {e}", is_error=True)
                 self.server_process = None
                 self.start_server_button.config(text="啟動 Bedrock Server")
-        self.start_server_button.config(text="關閉 Bedrock Server")
-        self.server_thread = threading.Thread(target=run_and_capture, daemon=True)
-        self.server_thread.start()
+
+        if service_status_returncode in (0, 2): # Service is installed (0 = running, 2 = installed but not running)
+            self._add_status_message("Service is installed. Attempting to start via service manager...")
+            self.start_server_button.config(text="停止 Bedrock Server") # Assume it will start, _check_autostart_status will correct if needed
+            self.server_thread = threading.Thread(target=run_and_capture_service_start, daemon=True)
+            self.server_thread.start()
+        else:
+            self._add_status_message("Service not installed or status unknown. Attempting direct start...")
+            self.start_server_button.config(text="停止 Bedrock Server") # Assume it will start
+            self.server_thread = threading.Thread(target=run_and_capture_direct_start, daemon=True)
+            self.server_thread.start()
 
     def _check_autostart_status(self):
         import sys
         import subprocess
         server_dir = os.path.join(self.script_dir, self.current_server_var.get())
         script_path = os.path.join(self.script_dir, "run_bedrock_server.py")
+
         if not os.path.isfile(script_path) or not os.path.isdir(server_dir):
             self.auto_start_button.config(text="設為開機自動啟動", command=self._toggle_autostart_bedrock_server, state=tk.DISABLED)
             return
         try:
             proc = subprocess.Popen([
-                sys.executable, script_path, "--status", "--service", server_dir
+                sys.executable, script_path, "--status-service"
             ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             output, _ = proc.communicate()
-            status_text = output.strip()
-            if proc.returncode == 0 and ("已設定" in status_text or "已存在" in status_text or "enabled" in status_text or "已啟用" in status_text):
+            status_text = output.strip().lower()
+            print("status_text:", status_text)
+            print("proc.returncode:", proc.returncode)
+            if proc.returncode in (0, 2):
                 self.auto_start_button.config(text="關閉開機自動啟動", command=lambda: self._toggle_autostart_bedrock_server(remove=True), state=tk.NORMAL)
+                # 若服務已安裝且正在執行，則啟動按鈕設為"停止 Bedrock Server"
+                if proc.returncode == 0:
+                    self.start_server_button.config(text="停止 Bedrock Server")
+                # 若服務已安裝但未執行，則啟動按鈕設為"啟動 Bedrock Server"
+                elif "but not running" in status_text:
+                    self.start_server_button.config(text="啟動 Bedrock Server")
             else:
                 self.auto_start_button.config(text="設為開機自動啟動", command=self._toggle_autostart_bedrock_server, state=tk.NORMAL)
         except Exception as e:
@@ -528,36 +696,100 @@ class ServerManagerApp:
             self.auto_start_button.config(text="設為開機自動啟動", command=self._toggle_autostart_bedrock_server, state=tk.NORMAL)
 
     def _toggle_autostart_bedrock_server(self, remove=False):
-        import sys
-        import subprocess
         server_dir = os.path.join(self.script_dir, self.current_server_var.get())
         script_path = os.path.join(self.script_dir, "run_bedrock_server.py")
+
         if not os.path.isfile(script_path):
             self._add_status_message("run_bedrock_server.py not found!", is_error=True)
             return
         if not os.path.isdir(server_dir):
-            self._add_status_message(f"Server directory '{server_dir}' not found!", is_error=True)
+            self._add_status_message(f"Server directory \'{server_dir}\' not found!", is_error=True)
             return
-        if remove:
-            self._add_status_message("正在移除開機自動啟動...")
-            args = [sys.executable, script_path, "--remove", "--service", server_dir]
-        else:
-            self._add_status_message("正在設定開機自動啟動...")
-            args = [sys.executable, script_path, "--create", "--service", server_dir]
+
         try:
-            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            if remove:
+                self._add_status_message("正在停止服務 (如果正在執行)...")
+                stop_args = [sys.executable, script_path, "--stop-service", server_dir]
+                stop_proc = subprocess.Popen(stop_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+                output, _ = stop_proc.communicate()
+                self._add_status_message(output.strip())
+                # We don't necessarily care about the return code of stop-service here,
+                # as it might not be running, which is fine. The main goal is to remove it.
+
+                self._add_status_message("正在移除開機自動啟動...")
+                remove_args = [sys.executable, script_path, "--remove-service", server_dir]
+                proc = subprocess.Popen(remove_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+            else:
+                self._add_status_message("正在設定開機自動啟動...")
+                create_args = [sys.executable, script_path, "--create-service", server_dir]
+                proc = subprocess.Popen(create_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
+            
             output, _ = proc.communicate()
             self._add_status_message(output.strip())
+
             if proc.returncode == 0:
                 if remove:
                     self._add_status_message("開機自動啟動已移除。")
+                    self.auto_start_button.config(text="設為開機自動啟動", command=self._toggle_autostart_bedrock_server, state=tk.NORMAL)
                 else:
                     self._add_status_message("開機自動啟動設定完成。")
+                    self.auto_start_button.config(text="關閉開機自動啟動", command=lambda: self._toggle_autostart_bedrock_server(remove=True), state=tk.NORMAL)
+                    self._start_bedrock_server()
             else:
                 self._add_status_message("開機自動啟動操作失敗。", is_error=True)
         except Exception as e:
             self._add_status_message(f"開機自動啟動操作失敗: {e}", is_error=True)
+        # 仍然再次查詢狀態以保險
         self._check_autostart_status()
+
+    def _backup_data(self):
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S") # Date and Time as YYYYMMDD-HHMMSS
+        backup_filename = f"backup-{timestamp}.zip"
+        backup_filepath = os.path.join(self.script_dir, backup_filename)
+
+        worlds_dir_to_backup = self.base_worlds_path
+        config_dir_to_backup = os.path.join(self.script_dir, "config")
+
+        items_to_backup = {
+            WORLDS_DIR_NAME: worlds_dir_to_backup,
+            "config": config_dir_to_backup
+        }
+
+        try:
+            self._add_status_message(f"Starting backup to {backup_filename}...")
+            with zipfile.ZipFile(backup_filepath, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for item_name, item_path in items_to_backup.items():
+                    if os.path.exists(item_path):
+                        if os.path.isdir(item_path):
+                            self._add_status_message(f"Backing up '{item_name}' directory ('{item_path}')...")
+                            for root, _, files in os.walk(item_path):
+                                for file in files:
+                                    file_abs_path = os.path.join(root, file)
+                                    # arcname is the path inside the zip file
+                                    arcname = os.path.join(item_name, os.path.relpath(file_abs_path, item_path))
+                                    zf.write(file_abs_path, arcname)
+                            self._add_status_message(f"'{item_name}' directory backed up.")
+                        elif os.path.isfile(item_path): # For single files, if ever needed for other items
+                            self._add_status_message(f"Backing up '{item_name}' file ('{item_path}')...")
+                            zf.write(item_path, item_name)
+                            self._add_status_message(f"'{item_name}' file backed up.")
+                    else:
+                        self._add_status_message(f"'{item_name}' not found at '{item_path}'. Skipping.", is_warning=True)
+            
+            self._add_status_message(f"Backup completed successfully: {backup_filepath}")
+            messagebox.showinfo("Backup Complete", f"Backup created successfully at:\n{backup_filepath}", parent=self.root)
+
+        except Exception as e:
+            self._add_status_message(f"Backup failed: {e}", is_error=True)
+            messagebox.showerror("Backup Failed", f"An error occurred during backup:\n{e}", parent=self.root)
+
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except AttributeError:
+        # This might happen if the shell32 library or IsUserAnAdmin function is not available,
+        # though it's standard on Windows.
+        return False
 
 def main():
     if not is_admin():
