@@ -24,7 +24,20 @@ This project provides a multi-version management tool for Minecraft Bedrock serv
 
 ## Installation & Usage
 
- ## 1. (Optional) **Replace** the included NSSM:
+⚠️ **Important: Initial Setup for Existing Servers**
+
+If you have existing Bedrock server installations that you want to manage with this tool, it is crucial to prepare your files *before* running `LilyGo.py` extensively or creating symlinks with it.
+
+1.  **Back up your data**: For each of your `bedrock-server-*` directories:
+    *   Back up the entire `worlds` sub-directory found within it.
+    *   Back up the `allowlist.json`, `permissions.json`, and `server.properties` files.
+2.  **Consolidate your data**: 
+    *   Move the contents of your backed-up `worlds` directories into the main `worlds/` directory at the root of the project (create this `worlds/` directory if it doesn\'t exist).
+    *   Move your backed-up `allowlist.json`, `permissions.json`, and `server.properties` files into the main `config/` directory at the root of the project (create this `config/` directory if it doesn\'t exist).
+
+This tool is designed to use these central `worlds/` and `config/` directories as the source of truth and will create symbolic links to them from within each active `bedrock-server-*` directory. Failing to consolidate your existing data first may lead to data being overwritten or not being correctly managed by the symlinking process.
+
+ ### 1. (Optional) **Replace** the included NSSM:
 
 If you prefer to use your own version of NSSM instead of the one provided:
 
