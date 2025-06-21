@@ -107,6 +107,7 @@ python LilyGo.pyw
     -   Allows toggling the auto-start behavior by managing the NSSM service.
 -   **Backup**: Creates a `.zip` archive of the `worlds` and `config` directories.
 -   **Latest Version Update**:  Added automatic version checking. A button is now available in the GUI to download and update to the latest version automatically.
+    -   The application retrieves the latest version number and download URL from: `https://raw.githubusercontent.com/kittizz/bedrock-server-downloads/main/bedrock-server-downloads.json`.
 
 ### `run_bedrock_server.py`
 This is a command-line helper script used by `LilyGo.pyw` and can also be run manually.
