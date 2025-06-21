@@ -1,6 +1,6 @@
 # Minecraft Bedrock Server Manager (LilyGo)
 
-This project provides a multi-version management tool for Minecraft Bedrock servers on Windows, featuring a Tkinter-based graphical user interface (`LilyGo.py`) for easy server administration and a helper script (`run_bedrock_server.py`) for command-line operations and NSSM-based service management.
+This project provides a multi-version management tool for Minecraft Bedrock servers on Windows, featuring a Tkinter-based graphical user interface (`LilyGo.pyw`) for easy server administration and a helper script (`run_bedrock_server.py`) for command-line operations and NSSM-based service management.
 
 ## Features
 
@@ -20,13 +20,13 @@ This project provides a multi-version management tool for Minecraft Bedrock serv
 
 -   Python 3.7+
 -   Windows Operating System
--   `nssm.exe` (The Non-Sucking Service Manager) must be placed in the same directory as `LilyGo.py` and `run_bedrock_server.py`. You can download it from [nssm.cc](https://nssm.cc/download).
+-   `nssm.exe` (The Non-Sucking Service Manager) must be placed in the same directory as `LilyGo.pyw` and `run_bedrock_server.py`. You can download it from [nssm.cc](https://nssm.cc/download).
 
 ## Installation & Usage
 
 ⚠️ **Important: Initial Setup for Existing Servers**
 
-If you have existing Bedrock server installations that you want to manage with this tool, it is crucial to prepare your files *before* running `LilyGo.py` extensively or creating symlinks with it.
+If you have existing Bedrock server installations that you want to manage with this tool, it is crucial to prepare your files *before* running `LilyGo.pyw` extensively or creating symlinks with it.
 
 1.  **Back up your data**: For each of your `bedrock-server-*` directories:
     *   Back up the entire `worlds` sub-directory found within it.
@@ -42,7 +42,7 @@ This tool is designed to use these central `worlds/` and `config/` directories a
 If you prefer to use your own version of NSSM instead of the one provided:
 
 - Download the latest `nssm.exe` from [nssm.cc](https://nssm.cc/download).
-- Place `nssm.exe` in the root directory of the project (next to `LilyGo.py` and `run_bedrock_server.py`).
+- Place `nssm.exe` in the root directory of the project (next to `LilyGo.pyw` and `run_bedrock_server.py`).
 
 ### 2. Install Python Dependencies
 
@@ -58,7 +58,7 @@ Ensure your server files are organized as follows:
 
 ```
 .
-├── LilyGo.py
+├── LilyGo.pyw
 ├── run_bedrock_server.py
 ├── nssm.exe                 # <-- NSSM executable, v2.24, win64 version
 ├── requirements.txt
@@ -82,20 +82,20 @@ Ensure your server files are organized as follows:
 └── backup-YYYYMMDD-HHMMSS.zip # Example backup file (auto-generated)
 ```
 
--   The `config/` and `worlds/` directories in the root are the central storage. `LilyGo.py` will attempt to create them if they don\'t exist.
+-   The `config/` and `worlds/` directories in the root are the central storage. `LilyGo.pyw` will attempt to create them if they don\'t exist.
 -   Symlinks will be created inside each `bedrock-server-*` directory, pointing to the central `worlds/` and `config/` files.
 
 ### 4. Launch the GUI Manager
 
 ```powershell
-python LilyGo.py
+python LilyGo.pyw
 ```
 
 > **Note:** The application will request administrator privileges on startup if not already elevated. This is necessary for managing NSSM services and creating symbolic links.
 
 ## Main Files
 
-### `LilyGo.py`
+### `LilyGo.pyw`
 -   **GUI**: Provides a user-friendly Tkinter interface for all management tasks.
 -   **Server Selection**: Allows changing the active Bedrock server version.
 -   **Start/Stop**: Starts or stops the Bedrock server (directly or via NSSM service).
@@ -106,9 +106,10 @@ python LilyGo.py
     -   Displays the current status of the service (e.g., Running, Stopped, Not Installed).
     -   Allows toggling the auto-start behavior by managing the NSSM service.
 -   **Backup**: Creates a `.zip` archive of the `worlds` and `config` directories.
+-   **Latest Version Update**:  Added automatic version checking. A button is now available in the GUI to download and update to the latest version automatically.
 
 ### `run_bedrock_server.py`
-This is a command-line helper script used by `LilyGo.py` and can also be run manually.
+This is a command-line helper script used by `LilyGo.pyw` and can also be run manually.
 
 -   **Direct Server Control**:
     -   `--start <server_directory_path>`: Starts `bedrock_server.exe` directly from the specified path.

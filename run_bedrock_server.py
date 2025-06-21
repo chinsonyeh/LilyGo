@@ -19,7 +19,11 @@ def run_bedrock_server(server_dir, as_service=False):
             return result.returncode
         else:
             # Start bedrock_server.exe as a subprocess
-            process = subprocess.Popen([exe_path], cwd=server_dir)
+            process = subprocess.Popen(
+                [exe_path],
+                cwd=server_dir,
+                text=True,
+            )
             def handle_signal(signum, frame):
                 print(f"Received signal {signum}, terminating bedrock_server.exe...")
                 try:

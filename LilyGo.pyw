@@ -11,6 +11,7 @@ import psutil
 import shutil # Added for rmtree
 from datetime import datetime # Added for backup timestamp
 import zipfile # Added for backup zip creation
+import ssl
 
 # Global constants for configuration
 CONFIG_FILE_NAME = "lilygo_config.ini"
@@ -39,8 +40,13 @@ class ServerManagerApp:
         self.current_server_var = tk.StringVar()
         # self.status_var = tk.StringVar() # Removed, will use Text widget directly
 
+        self.latest_bedrock_version = None
+        self.latest_bedrock_url = None
+
+        self.is_autostart_enabled = False  # Track autostart status
+
         self._setup_ui()
-        self._initial_setup_and_checks()
+        self._initial_setup_and_checks(check_newer_version_prompt=True)
 
     def _setup_ui(self):
         main_frame = ttk.Frame(self.root, padding="10")
@@ -49,38 +55,43 @@ class ServerManagerApp:
         self.root.rowconfigure(0, weight=1)
 
         # Server Directory Label and Entry
-        ttk.Label(main_frame, text="Selected Server Directory:").grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0,5))
+        ttk.Label(main_frame, text="Selected Server Directory:").grid(row=0, column=0, columnspan=5, sticky=tk.W, pady=(0,5))
         self.server_entry = ttk.Entry(main_frame, textvariable=self.current_server_var, state="readonly", width=70)
-        self.server_entry.grid(row=1, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=(0,10))
+        self.server_entry.grid(row=1, column=0, columnspan=5, sticky=(tk.W, tk.E), pady=(0,10))
 
-        # Backup Button
-        self.backup_button = ttk.Button(main_frame, text="備份", command=self._backup_data)
-        self.backup_button.grid(row=2, column=0, sticky=(tk.W, tk.E), padx=(0,5), pady=(0,10))
-
-        # Change Server Button
-        self.change_server_button = ttk.Button(main_frame, text="Change Server", command=self._select_server_directory)
-        self.change_server_button.grid(row=2, column=1, sticky=(tk.W, tk.E), padx=5, pady=(0,10))
-        
-        # Auto-start Button
-        self.auto_start_button = ttk.Button(main_frame, text="設為開機自動啟動", command=self._toggle_autostart_bedrock_server)
-        self.auto_start_button.grid(row=2, column=2, sticky=(tk.W, tk.E), padx=5, pady=(0,10))
-
-        # Start/Stop Server Button
+        # Start/Stop Server Button (leftmost)
         self.server_process = None
         self.server_thread = None
-        self.start_server_button = ttk.Button(main_frame, text="啟動 Bedrock Server", command=self._toggle_bedrock_server)
-        self.start_server_button.grid(row=2, column=3, sticky=(tk.W, tk.E), padx=(5,0), pady=(0,10))
+        self.start_server_button = ttk.Button(main_frame, text="Start Bedrock Server", command=self._toggle_bedrock_server)
+        self.start_server_button.grid(row=2, column=0, sticky=(tk.W, tk.E), padx=(0,5), pady=(0,10))
+
+        # Auto-start Button (2nd from left)
+        self.auto_start_button = ttk.Button(main_frame, text="Enable Autostart", command=self._toggle_autostart_bedrock_server)
+        self.auto_start_button.grid(row=2, column=1, sticky=(tk.W, tk.E), padx=5, pady=(0,10))
+
+        # Backup Button (shift right)
+        self.backup_button = ttk.Button(main_frame, text="Backup", command=self._backup_data)
+        self.backup_button.grid(row=2, column=2, sticky=(tk.W, tk.E), padx=5, pady=(0,10))
+
+        # Change Server Button (shift right)
+        self.switch_version_button = ttk.Button(main_frame, text="Switch Version", command=self._switch_version_directory)
+        self.switch_version_button.grid(row=2, column=3, sticky=(tk.W, tk.E), padx=5, pady=(0,10))
+        
+        # Download Latest Button (layout adjusted, same row/width as others)
+        self.download_latest_button = ttk.Button(main_frame, text="Download Latest Bedrock Server", command=self._download_latest_bedrock_server)
+        self.download_latest_button.grid(row=2, column=4, sticky=(tk.W, tk.E), padx=(5,0), pady=(0,10))
+        main_frame.columnconfigure(4, weight=1)  # Allow 5th column (download button) to expand
 
         # Status Label
-        ttk.Label(main_frame, text="Status Log:").grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(5,0))
+        ttk.Label(main_frame, text="Status Log:").grid(row=3, column=0, columnspan=5, sticky=tk.W, pady=(5,0))
         
         # Status Text Area with Scrollbar
         status_frame = ttk.Frame(main_frame)
-        status_frame.grid(row=4, column=0, columnspan=4, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0,10))
+        status_frame.grid(row=4, column=0, columnspan=5, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0,10))
         status_frame.columnconfigure(0, weight=1)
         status_frame.rowconfigure(0, weight=1)
 
-        self.status_text = tk.Text(status_frame, wrap=tk.WORD, height=10, state='disabled', relief=tk.SUNKEN, borderwidth=1)
+        self.status_text = tk.Text(status_frame, wrap=tk.WORD, height=25, state='disabled', relief=tk.SUNKEN, borderwidth=1)
         self.status_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
         scrollbar = ttk.Scrollbar(status_frame, orient=tk.VERTICAL, command=self.status_text.yview)
@@ -88,24 +99,22 @@ class ServerManagerApp:
         self.status_text['yscrollcommand'] = scrollbar.set
 
         # Configure main_frame column and row weights for expansion
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=1)
-        main_frame.columnconfigure(2, weight=1)
-        main_frame.columnconfigure(3, weight=1)
+        for i in range(5):
+            main_frame.columnconfigure(i, weight=1)
         main_frame.rowconfigure(4, weight=1)
+        self._update_download_button_state()
+        self._update_server_related_buttons_state()
 
     def _add_status_message(self, message, is_error=False, is_warning=False):
-        print(f"Status: {message}") # Log to console as well
-        self.status_text.config(state='normal') # Enable editing to insert text
-        # Split message by \n and insert each line as a new line
+        print(f"Status: {message}")
+        self.status_text.config(state='normal')
         lines = message.split('\n')
         for i, line in enumerate(lines):
             if self.status_text.index('end-1c') != '1.0' or i > 0:
                 self.status_text.insert(tk.END, "\n")
             self.status_text.insert(tk.END, line)
-        self.status_text.see(tk.END) # Scroll to the end
-        self.status_text.config(state='disabled') # Disable editing again
-
+        self.status_text.see(tk.END)
+        self.status_text.config(state='disabled')
         if is_error:
             messagebox.showerror("Error", message)
         elif is_warning:
@@ -158,7 +167,7 @@ class ServerManagerApp:
     def _get_server_directories_info(self):
         server_dirs = []
         if not os.path.isdir(self.script_dir):
-            self._add_status_message(f"Script directory '{self.script_dir}' not found.", is_error=True) # Corrected: \'{self.script_dir}\' to '{self.script_dir}'
+            self._add_status_message(f"Script directory '{self.script_dir}' not found.", is_error=True)
             return []
             
         for item in os.listdir(self.script_dir):
@@ -169,7 +178,7 @@ class ServerManagerApp:
                     version_obj = self._parse_version_tuple(version_str)
                     server_dirs.append({"name": item, "version": version_obj, "path": item_path})
                 except ValueError as e:
-                    self._add_status_message(f"Warning: Could not parse version from '{item}': {e}. Skipping.", is_warning=True) # Corrected: \'{item}\' to '{item}'
+                    self._add_status_message(f"Warning: Could not parse version from '{item}': {e}. Skipping.", is_warning=True)
         
         server_dirs.sort(key=lambda x: x["version"], reverse=True) # Newest first
         return server_dirs
@@ -178,12 +187,12 @@ class ServerManagerApp:
         if not os.path.exists(self.base_worlds_path):
             try:
                 os.makedirs(self.base_worlds_path)
-                self._add_status_message(f"Created base '{WORLDS_DIR_NAME}' directory: {self.base_worlds_path}") # Corrected: \'{WORLDS_DIR_NAME}\' to '{WORLDS_DIR_NAME}'
+                self._add_status_message(f"Created base '{WORLDS_DIR_NAME}' directory: {self.base_worlds_path}")
             except OSError as e:
-                self._add_status_message(f"Error creating base '{WORLDS_DIR_NAME}' dir: {e}", is_error=True) # Corrected: \'{WORLDS_DIR_NAME}\' to '{WORLDS_DIR_NAME}'
+                self._add_status_message(f"Error creating base '{WORLDS_DIR_NAME}' dir: {e}", is_error=True)
                 return False
         elif not os.path.isdir(self.base_worlds_path):
-            self._add_status_message(f"Error: '{self.base_worlds_path}' exists but is not a directory.", is_error=True) # Corrected: \'{self.base_worlds_path}\' to '{self.base_worlds_path}'
+            self._add_status_message(f"Error: '{self.base_worlds_path}' exists but is not a directory.", is_error=True)
             return False
         return True
 
@@ -192,7 +201,7 @@ class ServerManagerApp:
         server_name = os.path.basename(server_dir_path)
 
         if not os.path.exists(self.base_worlds_path) or not os.path.isdir(self.base_worlds_path):
-            self._add_status_message(f"Source '{WORLDS_DIR_NAME}' ('{self.base_worlds_path}') not found. Cannot create link.", is_warning=True) # Corrected: \'{WORLDS_DIR_NAME}\' (\'{self.base_worlds_path}\') to '{WORLDS_DIR_NAME}' ('{self.base_worlds_path}')
+            self._add_status_message(f"Source '{WORLDS_DIR_NAME}' ('{self.base_worlds_path}') not found. Cannot create link.", is_warning=True)
             return
 
         link_exists_correctly = False
@@ -214,35 +223,35 @@ class ServerManagerApp:
                         self._add_status_message(f"'{WORLDS_DIR_NAME}' symlink in '{server_name}' is correct.")
                         link_exists_correctly = True
                     else:
-                        msg = (f"Warning: '{WORLDS_DIR_NAME}' in '{server_name}' is a symlink but points to " # Corrected quotes
-                               f"'{link_target}' (resolves to '{abs_link_target}') instead of '{abs_base_worlds}'.") # Corrected quotes
+                        msg = (f"Warning: '{WORLDS_DIR_NAME}' in '{server_name}' is a symlink but points to "
+                               f"'{link_target}' (resolves to '{abs_link_target}') instead of '{abs_base_worlds}'.")
                         self._add_status_message(msg, is_warning=True)
-                        if messagebox.askyesno("Fix Symlink?", f"{msg}\\\\n\\\\nDelete and attempt to recreate?"):
+                        if messagebox.askyesno("Fix Symlink?", f"{msg}\\n\\nDelete and attempt to recreate?"):
                             try:
                                 os.unlink(target_link_path)
                                 self._add_status_message(f"Removed incorrect symlink: {target_link_path}")
                             except OSError as e_unlink:
-                                self._add_status_message(f"Error removing incorrect symlink '{target_link_path}': {e_unlink}", is_error=True) # Corrected: \'{target_link_path}\' to '{target_link_path}'
+                                self._add_status_message(f"Error removing incorrect symlink '{target_link_path}': {e_unlink}", is_error=True)
                                 return
                         else:
                             return # User chose not to fix
                 except OSError as e: # os.readlink can fail
-                    msg = f"Warning: Could not read symlink at '{target_link_path}': {e}. It might be broken." # Corrected: \'{target_link_path}\' to '{target_link_path}'
+                    msg = f"Warning: Could not read symlink at '{target_link_path}': {e}. It might be broken."
                     self._add_status_message(msg, is_warning=True)
-                    if messagebox.askyesno("Fix Broken Symlink?", f"{msg}\\\\n\\\\nDelete and attempt to recreate?"):
+                    if messagebox.askyesno("Fix Broken Symlink?", f"{msg}\\n\\nDelete and attempt to recreate?"):
                         try:
                             os.unlink(target_link_path)
                             self._add_status_message(f"Removed broken symlink: {target_link_path}")
                         except OSError as e_unlink:
-                            self._add_status_message(f"Error removing broken symlink '{target_link_path}': {e_unlink}", is_error=True) # Corrected: \'{target_link_path}\' to '{target_link_path}'
+                            self._add_status_message(f"Error removing broken symlink '{target_link_path}': {e_unlink}", is_error=True)
                             return
                     else:
                         return
             else: # Exists but is not a symlink
-                msg = (f"Warning: '{target_link_path}' exists but is not a symlink (it's a file or regular directory). " # Corrected: \'{target_link_path}\' and (it\\\'s to (it's
-                       f"It should be a symlink to the shared '{WORLDS_DIR_NAME}' directory.") # Corrected: \'{WORLDS_DIR_NAME}\' to '{WORLDS_DIR_NAME}'
+                msg = (f"Warning: '{target_link_path}' exists but is not a symlink (it's a file or regular directory). "
+                       f"It should be a symlink to the shared '{WORLDS_DIR_NAME}' directory.")
                 self._add_status_message(msg, is_warning=True)
-                if messagebox.askyesno("Resolve Conflict?", f"{msg}\\\\n\\\\nDelete the existing item and attempt to create a symlink? This will delete the item at '{target_link_path}'."): # Corrected: \'{target_link_path}\' to '{target_link_path}'
+                if messagebox.askyesno("Resolve Conflict?", f"{msg}\\n\\nDelete the existing item and attempt to create a symlink? This will delete the item at '{target_link_path}'."):
                     try:
                         if os.path.isdir(target_link_path): # For directories
                             import shutil
@@ -251,7 +260,7 @@ class ServerManagerApp:
                             os.remove(target_link_path)
                         self._add_status_message(f"Removed conflicting item: {target_link_path}")
                     except OSError as e_del:
-                        self._add_status_message(f"Error removing conflicting item '{target_link_path}': {e_del}", is_error=True) # Corrected: \'{target_link_path}\' to '{target_link_path}'
+                        self._add_status_message(f"Error removing conflicting item '{target_link_path}': {e_del}", is_error=True)
                         return
                 else:
                     return # User chose not to fix
@@ -259,12 +268,12 @@ class ServerManagerApp:
         if link_exists_correctly:
             return
 
-        self._add_status_message(f"Attempting to create symlink for '{WORLDS_DIR_NAME}' in '{server_name}'...") # Corrected: \'{WORLDS_DIR_NAME}\' in \'{server_name}\' to '{WORLDS_DIR_NAME}' in '{server_name}'
+        self._add_status_message(f"Attempting to create symlink for '{WORLDS_DIR_NAME}' in '{server_name}'...")
         try:
             os.symlink(self.base_worlds_path, target_link_path, target_is_directory=True)
-            self._add_status_message(f"Successfully created symlink: '{target_link_path}' -> '{self.base_worlds_path}'.") # Corrected: \'{target_link_path}\' -> \'{self.base_worlds_path}\' to '{target_link_path}' -> '{self.base_worlds_path}'
+            self._add_status_message(f"Successfully created symlink: '{target_link_path}' -> '{self.base_worlds_path}'.")
         except OSError as e:
-            error_msg = (f"Error creating symlink '{target_link_path}': {e}. " # Corrected: \'{target_link_path}\' to '{target_link_path}'
+            error_msg = (f"Error creating symlink '{target_link_path}': {e}. "
                          "On Windows, this may require administrator privileges or Developer Mode to be enabled.")
             self._add_status_message(error_msg, is_error=True)
         except AttributeError: 
@@ -326,7 +335,7 @@ class ServerManagerApp:
         return None
 
     def _load_existing_bedrock_log(self, proc):
-        # 嘗試尋找該進程的工作目錄下的 logs/latest.log 或 stdout log
+        # Try to find logs/latest.log or stdout log in the process working directory
         try:
             cwd = proc.cwd()
             log_path = os.path.join(cwd, 'logs', 'latest.log')
@@ -335,7 +344,7 @@ class ServerManagerApp:
                     for line in f:
                         self._add_status_message(line.rstrip())
             else:
-                # 若無 logs/latest.log，嘗試尋找 stdout log
+                # If no logs/latest.log, try to find any .log file
                 for fname in os.listdir(cwd):
                     if fname.lower().endswith('.log'):
                         with open(os.path.join(cwd, fname), 'r', encoding='utf-8', errors='ignore') as f:
@@ -343,16 +352,151 @@ class ServerManagerApp:
                                 self._add_status_message(line.rstrip())
                         break
         except Exception as e:
-            self._add_status_message(f"無法載入現有 bedrock_server log: {e}", is_warning=True)
+            self._add_status_message(f"Failed to load existing bedrock_server log: {e}", is_warning=True)
 
     def _attach_to_existing_bedrock_server(self, proc):
-        # 顯示提示，並允許按鈕關閉該進程
-        self._add_status_message(f"偵測到已執行的 bedrock_server.exe (PID: {proc.pid})，無法即時顯示 log，但已載入現有 log。", is_warning=True)
-        self.server_process = proc  # 儲存 psutil.Process 物件
-        self.start_server_button.config(text="停止 Bedrock Server")
+        # Show prompt and allow button to stop the process
+        self._add_status_message(f"Detected running bedrock_server.exe (PID: {proc.pid}), cannot show real-time log, but loaded existing log.")
+        self.server_process = proc  # Store psutil.Process object
+        self.start_server_button.config(text="Stop Bedrock Server")
         self._load_existing_bedrock_log(proc)
 
-    def _initial_setup_and_checks(self):
+    def _show_latest_bedrock_release_version(self):
+        import urllib.request
+        import json
+        try:
+            url = "https://raw.githubusercontent.com/kittizz/bedrock-server-downloads/main/bedrock-server-downloads.json"
+            with urllib.request.urlopen(url, timeout=10) as response:
+                data = json.load(response)
+            releases = data.get("release", {})
+            if not releases:
+                self._add_status_message("Could not get Bedrock Server release version info.", is_warning=True)
+                self.latest_bedrock_version = None
+                self.latest_bedrock_url = None
+                self._update_download_button_state()
+                return
+            # Get the largest version number (string sorting is not always correct, need to convert to tuple)
+            def version_tuple(v):
+                return tuple(int(x) for x in v.split('.'))
+            latest_version = max(releases.keys(), key=version_tuple)
+            self.latest_bedrock_version = latest_version
+            self.latest_bedrock_url = releases[latest_version]["windows"]["url"]
+            self._add_status_message(f"Bedrock Server Latest Release：{latest_version}")
+            folder_name = f"bedrock-server-{latest_version}"
+            dest_dir = os.path.join(self.script_dir, folder_name)
+            if os.path.exists(dest_dir):
+                msg = "Latest version already downloaded."
+                current_server_name = self.current_server_var.get()
+                if current_server_name and current_server_name.startswith("bedrock-server-"):
+                    current_version = current_server_name.replace('bedrock-server-', '')
+                elif current_server_name:
+                    current_version = current_server_name
+                else:
+                    current_version = None
+                if current_server_name != folder_name:
+                    if current_version:
+                        msg += f" Current version is {current_version}, consider switching to latest {latest_version}."
+                    else:
+                        msg += f" No version selected, consider switching to latest {latest_version}."
+                self._add_status_message(msg)
+            else:
+                self._add_status_message("Latest version not downloaded yet, please click the button to download.", is_warning=True)
+        except Exception as e:
+            self._add_status_message(f"Failed to fetch Bedrock Server latest release: {e}", is_warning=True)
+            self.latest_bedrock_version = None
+            self.latest_bedrock_url = None
+        self._update_download_button_state()
+
+    def _download_latest_bedrock_server(self):
+        import threading
+        import os
+        import tkinter as tk
+        from tkinter import ttk, filedialog
+        if not self.latest_bedrock_version or not self.latest_bedrock_url:
+            self._add_status_message("Could not get latest version info, please try again later.", is_error=True)
+            return
+        folder_name = f"bedrock-server-{self.latest_bedrock_version}"
+        dest_dir = os.path.join(self.script_dir, folder_name)
+        if os.path.exists(dest_dir):
+            self._add_status_message(f"Directory {folder_name} already exists, no need to download.", is_warning=True)
+            self._update_download_button_state()
+            return
+        zip_name = f"bedrock-server-{self.latest_bedrock_version}.zip"
+        zip_path = os.path.join(self.script_dir, zip_name)
+        def do_download():
+            try:
+                self._add_status_message(f"Downloading {zip_name} using PowerShell ...")
+                import subprocess
+                import webbrowser
+                # Create progress bar window (only shows downloading)
+                progress_win = tk.Toplevel(self.root)
+                progress_win.title("Download Progress")
+                ttk.Label(progress_win, text=f"Downloading {zip_name} (using PowerShell Invoke-WebRequest)").pack(padx=10, pady=10)
+                progress_label = ttk.Label(progress_win, text="Downloading... Please wait")
+                progress_label.pack(padx=10, pady=10)
+                progress_win.grab_set()
+                progress_win.transient(self.root)
+                progress_win.resizable(False, False)
+                self.root.update_idletasks()
+                # Use PowerShell Invoke-WebRequest to download, force show Verbose
+                ps_cmd = f"$VerbosePreference = 'Continue'; Invoke-WebRequest -Uri \"{self.latest_bedrock_url}\" -OutFile \"{zip_path}\" -UseBasicParsing -Verbose"
+                full_cmd = ["powershell", "-NoProfile", "-Command", ps_cmd]
+                self._add_status_message(f"PowerShell command: {ps_cmd}")
+                proc = subprocess.Popen(
+                    full_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    shell=False
+                )
+                ps_output = []
+                while True:
+                    line = proc.stdout.readline()
+                    if not line and proc.poll() is not None:
+                        break
+                    if line:
+                        self._add_status_message(line.rstrip())
+                        ps_output.append(line.rstrip())
+                rc = proc.wait()
+                progress_win.destroy()
+                if rc != 0:
+                    self._add_status_message(f"PowerShell download failed output:\n" + '\n'.join(ps_output), is_error=True)
+                    raise RuntimeError(f"PowerShell download failed, exit code {rc}")
+                self._add_status_message(f"Download completed: {zip_path}, extracting...")
+                import zipfile
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(dest_dir)
+                self._add_status_message(f"Extracted successfully to {dest_dir}")
+                os.remove(zip_path)
+                self._add_status_message(f"To switch to the new version, use the 'Switch Version' button to select {folder_name}.")
+                self._update_download_button_state()
+            except Exception as e:
+                self._add_status_message(f"Download or extraction failed: {e}", is_error=True)
+                try:
+                    progress_win.destroy()
+                except:
+                    pass
+                if messagebox.askyesno("Download Failed", "Download failed. Open download page in browser?\n\nURL:\n" + str(self.latest_bedrock_url)):
+                    webbrowser.open(self.latest_bedrock_url)
+                if messagebox.askyesno("Manual Extraction", "Do you want to manually select a downloaded ZIP file to extract?"):
+                    zip_file = filedialog.askopenfilename(
+                        title="Select downloaded Bedrock Server ZIP file",
+                        filetypes=[("ZIP files", "*.zip")]
+                    )
+                    if zip_file:
+                        try:
+                            with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                                zip_ref.extractall(dest_dir)
+                            self._add_status_message(f"Manual extraction completed, installed to {dest_dir}")
+                            self._add_status_message(f"To switch to the new version, use the 'Switch Version' button to select {folder_name}.")
+                            self._update_download_button_state()
+                        except Exception as e2:
+                            self._add_status_message(f"Manual extraction failed: {e2}", is_error=True)
+                        return
+                return
+        threading.Thread(target=do_download, daemon=True).start()
+
+    def _initial_setup_and_checks(self, check_newer_version_prompt=True):
         self._clear_status()
         self._add_status_message("Starting checks...")
         
@@ -381,132 +525,94 @@ class ServerManagerApp:
         final_server_to_use_info = None
 
         if current_selected_server_info:
-            # Check if the configured server is older than the latest found on disk
-            if current_selected_server_info["name"] != latest_server_info["name"] and \
-               latest_server_info["version"] > current_selected_server_info["version"]:
-                msg = (f"A newer server version '{latest_server_info['name']}' is available.\\\\n" # Corrected: \'{latest_server_info[\\\'name\\\']}\\\' to '{latest_server_info['name']}'
-                       f"Your currently selected version is '{current_selected_server_info['name']}'.\\\\n\\\\n" # Corrected: \'{current_selected_server_info[\\\'name\\\']}\\\' to '{current_selected_server_info['name']}'
-                       "Do you want to switch to the newer version?")
-                if messagebox.askyesno("Update Available", msg):
-                    final_server_to_use_info = latest_server_info
-                    self._add_status_message(f"User opted to switch to newer server: {latest_server_info['name']}.") # Corrected: latest_server_to_use_info[\'name\'] to latest_server_info['name'] (and quotes)
-                else:
-                    final_server_to_use_info = current_selected_server_info
-                    self._add_status_message(f"User opted to stay with server: {current_selected_server_info['name']}.") # Corrected: [\'name\'] to ['name']
-            else:
-                final_server_to_use_info = current_selected_server_info
-                # Only add this message if it wasn't just set by user choice or defaulting
-                if configured_server_name == final_server_to_use_info["name"]: # Check if it's the original config
-                     self._add_status_message(f"Current server '{current_selected_server_info['name']}' is up-to-date or preferred.") # Corrected: \'{...[\'name\']}\' to '{...['name']}'
-        else: # No valid configuration or configured server not found
+            # 直接維持原本設定的 server，不再詢問是否切換新版
+            final_server_to_use_info = current_selected_server_info
+            if configured_server_name == final_server_to_use_info["name"]:
+                self._add_status_message(f"Current server '{current_selected_server_info['name']}' is up-to-date or preferred.")
+        else:
             final_server_to_use_info = latest_server_info
             if configured_server_name: 
-                 self._add_status_message(f"Previously configured server '{configured_server_name}' not found/valid. Defaulting to latest: {latest_server_info['name']}.", is_warning=True) # Corrected quotes
-                 messagebox.showinfo("Server Selection Changed", f"Previously configured server '{configured_server_name}' was not found or is no longer valid. Switched to the latest available: '{latest_server_info['name']}'.") # Corrected quotes
+                self._add_status_message(f"Previously configured server '{configured_server_name}' not found/valid. Defaulting to latest: {latest_server_info['name']}.", is_warning=True)
+                messagebox.showinfo("Server Selection Changed", f"Previously configured server '{configured_server_name}' was not found or is no longer valid. Switched to the latest available: '{latest_server_info['name']}'.")
             else:
-                 self._add_status_message(f"No previous configuration. Defaulting to latest server: {latest_server_info['name']}.") # Corrected quotes
-                 messagebox.showinfo("Server Selection", f"Selected server set to the latest available: '{latest_server_info['name']}'.") # Corrected quotes
-
+                self._add_status_message(f"No previous configuration. Defaulting to latest server: {latest_server_info['name']}.")
+                messagebox.showinfo("Server Selection", f"Selected server set to the latest available: '{latest_server_info['name']}'.")
 
         if final_server_to_use_info:
             self.current_server_var.set(final_server_to_use_info["name"])
             self._save_config(final_server_to_use_info["name"])
-            self._add_status_message(f"Selected server: {final_server_to_use_info['name']}.") # Corrected quotes
+            self._add_status_message(f"Selected server: {final_server_to_use_info['name']}.")
             self._check_and_create_worlds_link(final_server_to_use_info["path"])
             self._ensure_config_symlinks(final_server_to_use_info["path"])
-            # 新增：啟動時自動偵測現有 bedrock_server.exe
             try:
                 import psutil
             except ImportError:
-                self._add_status_message("缺少 psutil 套件，無法自動偵測現有 bedrock_server.exe。", is_warning=True)
+                self._add_status_message("Missing psutil package, cannot auto-detect running bedrock_server.exe.", is_warning=True)
                 return
             proc = self._find_existing_bedrock_server_process()
             if proc:
                 self._attach_to_existing_bedrock_server(proc)
-            # 新增：查詢自動啟動狀態
             self._check_autostart_status()
         else:
-            # This case should ideally not be reached if all_server_infos is not empty
             self.current_server_var.set("")
             self._save_config(None)
             self._add_status_message("Could not determine a server directory to use.", is_warning=True)
             self._check_autostart_status()
 
-    def _select_server_directory(self):
+        self._show_latest_bedrock_release_version()
+
+    def _switch_version_directory(self):
         server_infos = self._get_server_directories_info()
         if not server_infos:
-            messagebox.showinfo("Change Server", "No Bedrock server directories found to select from.", parent=self.root)
+            messagebox.showinfo("Switch Version", "No Bedrock server directories found to select from.", parent=self.root)
             return
-
         select_window = tk.Toplevel(self.root)
-        select_window.title("Select Server Directory")
-        select_window.transient(self.root) # Set to be on top of the main window
-        select_window.grab_set() # Make it modal
-
+        select_window.title("Switch Version Directory")
+        select_window.transient(self.root)
+        select_window.grab_set()
         ttk.Label(select_window, text="Available server directories:").pack(pady=(10,5), padx=10)
-
         listbox_frame = ttk.Frame(select_window)
         listbox_frame.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
-        
         listbox = tk.Listbox(listbox_frame, exportselection=False, height=10)
         for s_info in server_infos:
             listbox.insert(tk.END, s_info["name"])
-        
         current_server_name = self.current_server_var.get()
         if current_server_name:
             try:
-                # Get a list of names for index finding
                 names_only = [s_info["name"] for s_info in server_infos]
                 current_idx = names_only.index(current_server_name)
                 listbox.select_set(current_idx)
                 listbox.see(current_idx)
                 listbox.activate(current_idx)
             except ValueError:
-                pass # Current server not in list, do nothing
-
+                pass
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         list_scrollbar = ttk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=listbox.yview)
         list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         listbox['yscrollcommand'] = list_scrollbar.set
-        
         def on_select():
             selected_indices = listbox.curselection()
             if not selected_indices:
                 messagebox.showwarning("Selection Error", "Please select a server directory.", parent=select_window)
                 return
-            
             selected_server_name = listbox.get(selected_indices[0])
-            
-            self._add_status_message(f"Changing server to: {selected_server_name}...")
+            self._add_status_message(f"Switching version to: {selected_server_name}...")
             self._save_config(selected_server_name)
-            
-            # Trigger a full refresh which will load the new config, update UI, and symlinks
-            self._initial_setup_and_checks() 
-            
-            # _initial_setup_and_checks will set the final status, but we can confirm the change.
-            # Check if the current_server_var actually changed to the selected one after refresh.
+            self._initial_setup_and_checks(check_newer_version_prompt=False)
             if self.current_server_var.get() == selected_server_name:
-                self._add_status_message(f"Successfully changed and refreshed for server: {selected_server_name}.")
+                self._add_status_message(f"Successfully switched and refreshed for version: {selected_server_name}.")
             else:
-                self._add_status_message(f"Server change initiated for {selected_server_name}. Check status for details.", is_warning=True)
-
+                self._add_status_message(f"Version switch initiated for {selected_server_name}. Check status for details.", is_warning=True)
             select_window.destroy()
-
         def on_cancel():
             select_window.destroy()
-
         button_frame = ttk.Frame(select_window)
         button_frame.pack(pady=(5,10), padx=10)
-
         select_button = ttk.Button(button_frame, text="Select", command=on_select)
         select_button.pack(side=tk.LEFT, padx=5)
-
         cancel_button = ttk.Button(button_frame, text="Cancel", command=on_cancel)
         cancel_button.pack(side=tk.LEFT, padx=5)
-
-        # Center the Toplevel window
-        select_window.update_idletasks() # Ensure window size is calculated
+        select_window.update_idletasks()
         x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (select_window.winfo_width() // 2)
         y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (select_window.winfo_height() // 2)
         select_window.geometry(f"+{x}+{y}")
@@ -520,7 +626,7 @@ class ServerManagerApp:
         # but script_path is needed by _execute_stop_sequence.
         server_dir = os.path.join(self.script_dir, self.current_server_var.get())
 
-        if current_button_text in ("關閉 Bedrock Server", "停止 Bedrock Server"):
+        if current_button_text in ("Stop Bedrock Server"):
             self._add_status_message("=== Attempting to stop Bedrock Server... ===")
             # Disable button while stopping to prevent multiple clicks
             # self.start_server_button.config(state=tk.DISABLED) 
@@ -585,8 +691,8 @@ class ServerManagerApp:
             self._add_status_message(f"Overall error during stop sequence: {e}", is_error=True)
         finally:
             self.server_process = None # Clear any Popen object from a direct start
-            # Schedule GUI update on the main thread
             self.root.after(200, self._check_autostart_status)
+            self._update_server_related_buttons_state()
 
     def _start_bedrock_server(self):
         server_dir = os.path.join(self.script_dir, self.current_server_var.get())
@@ -632,8 +738,7 @@ class ServerManagerApp:
                 # The actual bedrock_server.exe is managed by the service.
             except Exception as e:
                 self._add_status_message(f"Failed to start Bedrock Server service: {e}", is_error=True)
-            # Button text will be updated by _check_autostart_status
-
+            self._update_server_related_buttons_state()
         def run_and_capture_direct_start():
             self._add_status_message("=== Starting bedrock_server.exe (direct) ===")
             try:
@@ -647,22 +752,51 @@ class ServerManagerApp:
                 self.server_process.wait()
                 self._add_status_message(f"=== bedrock_server.exe finished, exit code: {self.server_process.returncode} ===")
                 self.server_process = None
-                self.start_server_button.config(text="啟動 Bedrock Server")
+                self.start_server_button.config(text="Start Bedrock Server")
             except Exception as e:
                 self._add_status_message(f"Failed to start or run bedrock_server.exe (direct): {e}", is_error=True)
                 self.server_process = None
-                self.start_server_button.config(text="啟動 Bedrock Server")
-
+                self.start_server_button.config(text="Start Bedrock Server")
+            self._update_server_related_buttons_state()
         if service_status_returncode in (0, 2): # Service is installed (0 = running, 2 = installed but not running)
             self._add_status_message("Service is installed. Attempting to start via service manager...")
-            self.start_server_button.config(text="停止 Bedrock Server") # Assume it will start, _check_autostart_status will correct if needed
+            self.start_server_button.config(text="Stop Bedrock Server") # Assume it will start, _check_autostart_status will correct if needed
             self.server_thread = threading.Thread(target=run_and_capture_service_start, daemon=True)
             self.server_thread.start()
         else:
             self._add_status_message("Service not installed or status unknown. Attempting direct start...")
-            self.start_server_button.config(text="停止 Bedrock Server") # Assume it will start
+            self.start_server_button.config(text="Stop Bedrock Server") # Assume it will start
             self.server_thread = threading.Thread(target=run_and_capture_direct_start, daemon=True)
             self.server_thread.start()
+        self._update_server_related_buttons_state()
+
+    def _update_change_server_button_state(self):
+        # 只有未啟動伺服器且未設定自動啟動時，才能切換版本
+        btn_text = self.start_server_button.cget("text")
+        if btn_text in ("Stop Bedrock Server",) or self.is_autostart_enabled:
+            self.switch_version_button.config(state=tk.DISABLED)
+        else:
+            self.switch_version_button.config(state=tk.NORMAL)
+
+    def _update_server_related_buttons_state(self):
+        # 只有未啟動伺服器且未設定自動啟動時，才能切換版本與備份
+        btn_text = self.start_server_button.cget("text")
+        if self.is_autostart_enabled:
+            self.switch_version_button.config(state=tk.DISABLED)
+            self.backup_button.config(state=tk.DISABLED)
+            self.start_server_button.config(state=tk.DISABLED)  # 設定開機自動啟動時，啟動/停止按鈕也 disable
+            self.auto_start_button.config(state=tk.NORMAL)
+        else:
+            if btn_text in ("Stop Bedrock Server",):
+                self.switch_version_button.config(state=tk.DISABLED)
+                self.backup_button.config(state=tk.DISABLED)
+                self.start_server_button.config(state=tk.NORMAL)
+                self.auto_start_button.config(state=tk.DISABLED)
+            else:
+                self.switch_version_button.config(state=tk.NORMAL)
+                self.backup_button.config(state=tk.NORMAL)
+                self.start_server_button.config(state=tk.NORMAL)
+                self.auto_start_button.config(state=tk.NORMAL)
 
     def _check_autostart_status(self):
         import sys
@@ -671,7 +805,9 @@ class ServerManagerApp:
         script_path = os.path.join(self.script_dir, "run_bedrock_server.py")
 
         if not os.path.isfile(script_path) or not os.path.isdir(server_dir):
-            self.auto_start_button.config(text="設為開機自動啟動", command=self._toggle_autostart_bedrock_server, state=tk.DISABLED)
+            self.auto_start_button.config(text="Enable Autostart", command=self._toggle_autostart_bedrock_server, state=tk.DISABLED)
+            self.is_autostart_enabled = False
+            self._update_change_server_button_state()
             return
         try:
             proc = subprocess.Popen([
@@ -682,18 +818,21 @@ class ServerManagerApp:
             print("status_text:", status_text)
             print("proc.returncode:", proc.returncode)
             if proc.returncode in (0, 2):
-                self.auto_start_button.config(text="關閉開機自動啟動", command=lambda: self._toggle_autostart_bedrock_server(remove=True), state=tk.NORMAL)
-                # 若服務已安裝且正在執行，則啟動按鈕設為"停止 Bedrock Server"
+                self.auto_start_button.config(text="Disable Autostart", command=lambda: self._toggle_autostart_bedrock_server(remove=True), state=tk.NORMAL)
+                self.is_autostart_enabled = True
                 if proc.returncode == 0:
-                    self.start_server_button.config(text="停止 Bedrock Server")
-                # 若服務已安裝但未執行，則啟動按鈕設為"啟動 Bedrock Server"
+                    self.start_server_button.config(text="Stop Bedrock Server")
                 elif "but not running" in status_text:
-                    self.start_server_button.config(text="啟動 Bedrock Server")
+                    self.start_server_button.config(text="Start Bedrock Server")
             else:
-                self.auto_start_button.config(text="設為開機自動啟動", command=self._toggle_autostart_bedrock_server, state=tk.NORMAL)
+                self.auto_start_button.config(text="Enable Autostart", command=self._toggle_autostart_bedrock_server, state=tk.NORMAL)
+                self.is_autostart_enabled = False
+            self._update_server_related_buttons_state()
         except Exception as e:
-            self._add_status_message(f"查詢開機自動啟動狀態失敗: {e}", is_warning=True)
-            self.auto_start_button.config(text="設為開機自動啟動", command=self._toggle_autostart_bedrock_server, state=tk.NORMAL)
+            self._add_status_message(f"Failed to check autostart status: {e}", is_warning=True)
+            self.auto_start_button.config(text="Enable Autostart", command=self._toggle_autostart_bedrock_server, state=tk.NORMAL)
+            self.is_autostart_enabled = False
+            self._update_server_related_buttons_state()
 
     def _toggle_autostart_bedrock_server(self, remove=False):
         server_dir = os.path.join(self.script_dir, self.current_server_var.get())
@@ -708,7 +847,7 @@ class ServerManagerApp:
 
         try:
             if remove:
-                self._add_status_message("正在停止服務 (如果正在執行)...")
+                self._add_status_message("Stopping service (if running)...")
                 stop_args = [sys.executable, script_path, "--stop-service", server_dir]
                 stop_proc = subprocess.Popen(stop_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
                 output, _ = stop_proc.communicate()
@@ -716,45 +855,41 @@ class ServerManagerApp:
                 # We don't necessarily care about the return code of stop-service here,
                 # as it might not be running, which is fine. The main goal is to remove it.
 
-                self._add_status_message("正在移除開機自動啟動...")
+                self._add_status_message("Removing autostart...")
                 remove_args = [sys.executable, script_path, "--remove-service", server_dir]
                 proc = subprocess.Popen(remove_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
             else:
-                self._add_status_message("正在設定開機自動啟動...")
+                self._add_status_message("Setting up autostart...")
                 create_args = [sys.executable, script_path, "--create-service", server_dir]
                 proc = subprocess.Popen(create_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
             
             output, _ = proc.communicate()
             self._add_status_message(output.strip())
-
             if proc.returncode == 0:
                 if remove:
-                    self._add_status_message("開機自動啟動已移除。")
-                    self.auto_start_button.config(text="設為開機自動啟動", command=self._toggle_autostart_bedrock_server, state=tk.NORMAL)
+                    self._add_status_message("Autostart removed.")
+                    self.auto_start_button.config(text="Enable Autostart", command=self._toggle_autostart_bedrock_server, state=tk.NORMAL)
+                    self.start_server_button.config(text="Start Bedrock Server")
                 else:
-                    self._add_status_message("開機自動啟動設定完成。")
-                    self.auto_start_button.config(text="關閉開機自動啟動", command=lambda: self._toggle_autostart_bedrock_server(remove=True), state=tk.NORMAL)
+                    self._add_status_message("Autostart setup complete.")
+                    self.auto_start_button.config(text="Disable Autostart", command=lambda: self._toggle_autostart_bedrock_server(remove=True), state=tk.NORMAL)
                     self._start_bedrock_server()
             else:
-                self._add_status_message("開機自動啟動操作失敗。", is_error=True)
+                self._add_status_message("Autostart operation failed.", is_error=True)
         except Exception as e:
-            self._add_status_message(f"開機自動啟動操作失敗: {e}", is_error=True)
-        # 仍然再次查詢狀態以保險
+            self._add_status_message(f"Autostart operation failed: {e}", is_error=True)
         self._check_autostart_status()
 
     def _backup_data(self):
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S") # Date and Time as YYYYMMDD-HHMMSS
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup_filename = f"backup-{timestamp}.zip"
         backup_filepath = os.path.join(self.script_dir, backup_filename)
-
         worlds_dir_to_backup = self.base_worlds_path
         config_dir_to_backup = os.path.join(self.script_dir, "config")
-
         items_to_backup = {
             WORLDS_DIR_NAME: worlds_dir_to_backup,
             "config": config_dir_to_backup
         }
-
         try:
             self._add_status_message(f"Starting backup to {backup_filename}...")
             with zipfile.ZipFile(backup_filepath, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -765,23 +900,32 @@ class ServerManagerApp:
                             for root, _, files in os.walk(item_path):
                                 for file in files:
                                     file_abs_path = os.path.join(root, file)
-                                    # arcname is the path inside the zip file
                                     arcname = os.path.join(item_name, os.path.relpath(file_abs_path, item_path))
                                     zf.write(file_abs_path, arcname)
                             self._add_status_message(f"'{item_name}' directory backed up.")
-                        elif os.path.isfile(item_path): # For single files, if ever needed for other items
+                        elif os.path.isfile(item_path):
                             self._add_status_message(f"Backing up '{item_name}' file ('{item_path}')...")
                             zf.write(item_path, item_name)
                             self._add_status_message(f"'{item_name}' file backed up.")
                     else:
                         self._add_status_message(f"'{item_name}' not found at '{item_path}'. Skipping.", is_warning=True)
-            
             self._add_status_message(f"Backup completed successfully: {backup_filepath}")
             messagebox.showinfo("Backup Complete", f"Backup created successfully at:\n{backup_filepath}", parent=self.root)
-
         except Exception as e:
             self._add_status_message(f"Backup failed: {e}", is_error=True)
             messagebox.showerror("Backup Failed", f"An error occurred during backup:\n{e}", parent=self.root)
+
+    def _update_download_button_state(self):
+        # 根據本地是否已有最新版自動 enable/disable 下載按鈕
+        if not self.latest_bedrock_version:
+            self.download_latest_button.config(state=tk.DISABLED)
+            return
+        folder_name = f"bedrock-server-{self.latest_bedrock_version}"
+        dest_dir = os.path.join(self.script_dir, folder_name)
+        if os.path.exists(dest_dir):
+            self.download_latest_button.config(state=tk.DISABLED)
+        else:
+            self.download_latest_button.config(state=tk.NORMAL)
 
 def is_admin():
     try:
